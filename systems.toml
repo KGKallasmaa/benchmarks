@@ -62,6 +62,10 @@ mode = "advanced"
 [searchers.brave-llm-context]
 provider = "brave"
 
+[searchers.tavily-advanced]
+provider = "tavily"
+search_depth = "advanced"
+
 [systems.scout-exa-instant-highlights]
 kind = "scout"
 searcher = "exa-instant-highlights"
@@ -181,6 +185,18 @@ searcher = "brave-llm-context"
 [systems.search-brave-llm-context]
 kind = "search"
 searcher = "brave-llm-context"
+
+[systems.scout-tavily-advanced]
+kind = "scout"
+searcher = "tavily-advanced"
+
+[systems.rag-tavily-advanced]
+kind = "rag"
+searcher = "tavily-advanced"
+
+[systems.search-tavily-advanced]
+kind = "search"
+searcher = "tavily-advanced"
 
 [systems.openai-native-search]
 kind = "scout"

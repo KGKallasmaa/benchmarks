@@ -20,7 +20,7 @@ from benchmarks.graders.base import gather_judgments
 from harness import cli
 from harness import rag as rag_module
 from harness import systems as system_module
-from harness.legacy import legacy_main
+from harness.legacy import legacy_main, system_name
 from harness.llm import anthropic as anthropic_client
 from harness.llm import openai as openai_client
 from harness.llm.clients import ModelClient
@@ -46,6 +46,7 @@ from harness.searchers import (
     Searcher,
     SearchResponse,
     SearchResult,
+    TavilySearcher,
 )
 from harness.suite import Grade, Suite, Task
 from harness.systems import Catalog, System
@@ -290,6 +291,156 @@ async def test_perplexity_search_api_shape():
     assert seen["body"] == {"query": "q", "max_results": 7, "search_type": "fast"}
     assert seen["auth"] == "Bearer k"
     assert response.results[0].text == "s" and response.cost_usd == 0.001
+
+
+async def test_tavily_advanced_request_and_response():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        seen["auth"] = request.headers["Authorization"]
+        return httpx.Response(
+            200,
+            json={
+                "request_id": "r1",
+                "usage": {"credits": 3},
+                "results": [
+                    {
+                        "url": "https://a",
+                        "title": "A",
+                        "content": "snippet",
+                        "raw_content": None,
+                        "score": 0.9,
+                        "published_date": "2026-01-01",
+                        "id": "doc1",
+                        "favicon": "https://a/favicon.ico",
+                        "images": [],
+                    },
+                    {"url": "https://b", "raw_content": "full text", "content": "short"},
+                ],
+            },
+        )
+
+    searcher = TavilySearcher(api_key="k")
+    await searcher.close()
+    searcher._client = mock_client(handler)
+    try:
+        response = await searcher.run("question")
+    finally:
+        await searcher.close()
+    assert seen == {
+        "url": "https://api.tavily.com/search",
+        "auth": "Bearer k",
+        "body": {
+            "query": "question",
+            "max_results": 10,
+            "search_depth": "advanced",
+            "include_published_date": True,
+            "include_usage": True,
+        },
+    }
+    assert response.cost_usd == pytest.approx(0.024)
+    assert response.request_id == "r1" and response.queries == ["question"]
+    assert response.latency_ms >= 0
+    assert [row.text for row in response.results] == ["snippet", "full text"]
+    assert response.results[0].metadata == {
+        "rank": 0,
+        "score": 0.9,
+        "published_date": "2026-01-01",
+        "id": "doc1",
+        "favicon": "https://a/favicon.ico",
+        "images": [],
+    }
+    assert response.results[1].metadata["rank"] == 1
+
+
+@pytest.mark.parametrize("usage,cost", [(None, 0.016), ({}, 0.016), ({"credits": 0}, 0.0)])
+async def test_tavily_limits_and_cost_without_results(usage, cost, caplog):
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"results": [], "usage": usage})
+
+    searcher = TavilySearcher(api_key="k")
+    await searcher.close()
+    searcher._client = mock_client(handler)
+    query = "word " * 100
+    try:
+        response = await searcher.run(query, 30)
+    finally:
+        await searcher.close()
+    assert seen["query"] == query[:400].rsplit(" ", 1)[0]
+    assert seen["max_results"] == 20
+    assert response.queries == [seen["query"]]
+    assert "truncating" in caplog.text
+    assert response.results == [] and response.cost_usd == pytest.approx(cost)
+
+
+@pytest.mark.parametrize("status", [429, 503])
+async def test_tavily_retries_transient_errors(monkeypatch, status):
+    attempts = []
+
+    def handler(request):
+        attempts.append(request)
+        return httpx.Response(status if len(attempts) == 1 else 200, json={"results": []})
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    searcher = TavilySearcher(api_key="k", max_attempts=2)
+    await searcher.close()
+    searcher._client = mock_client(handler)
+    try:
+        assert await searcher.search("q") == []
+    finally:
+        await searcher.close()
+    assert len(attempts) == 2
+
+
+@pytest.mark.parametrize("status,max_attempts", [(401, 4), (432, 4), (433, 4), (503, 1)])
+async def test_tavily_propagates_api_errors(status, max_attempts):
+    attempts = []
+
+    def handler(request):
+        attempts.append(request)
+        return httpx.Response(status)
+
+    searcher = TavilySearcher(api_key="k", max_attempts=max_attempts)
+    await searcher.close()
+    searcher._client = mock_client(handler)
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await searcher.run("q")
+    finally:
+        await searcher.close()
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize("kind", ["scout", "rag", "search"])
+def test_tavily_catalog_and_credentials(monkeypatch, kind):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    spec = Catalog.load().resolve(f"{kind}-tavily-advanced")
+    assert spec.settings["num_results"] == 10
+    assert spec.searcher == {
+        "name": "tavily-advanced",
+        "provider": "tavily",
+        "search_depth": "advanced",
+    }
+    assert cli.missing_credentials(spec, None) == ["TAVILY_API_KEY"]
+    with pytest.raises(ValueError, match="TAVILY_API_KEY required"):
+        TavilySearcher()
+    monkeypatch.setenv("TAVILY_API_KEY", "test")
+    assert cli.missing_credentials(spec, None) == []
+
+
+@pytest.mark.parametrize("family", ["people", "company", "publication"])
+@pytest.mark.parametrize("track,kind", [("retrieval", "search"), ("rag", "rag")])
+def test_legacy_tavily_alias(family, track, kind):
+    assert system_name(family, track, "tavily") == f"{kind}-tavily-advanced"
 
 
 # --------------------------------------------------------------------------- tools
@@ -796,6 +947,7 @@ async def test_every_catalog_system_builds(monkeypatch):
         "BRAVE_SEARCH_API_KEY",
         "PARALLEL_API_KEY",
         "PERPLEXITY_API_KEY",
+        "TAVILY_API_KEY",
     ):
         monkeypatch.setenv(name, "test")
     catalog = Catalog.load()
@@ -972,6 +1124,7 @@ def test_run_directory_changes_with_the_spec(tmp_path):
         ("parallel-basic", "mode", "basic"),
         ("parallel-advanced", "mode", "advanced"),
         ("brave-llm-context", "provider", "brave"),
+        ("tavily-advanced", "search_depth", "advanced"),
     ],
 )
 def test_requested_scout_presets(name, option, value):
@@ -993,6 +1146,7 @@ def test_scout_catalog_contains_exactly_the_requested_api_presets():
         "parallel-basic",
         "parallel-advanced",
         "brave-llm-context",
+        "tavily-advanced",
     }
 
 

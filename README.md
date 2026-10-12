@@ -4,7 +4,7 @@ Open datasets and a shared evaluation harness for search APIs, with 11 runnable
 suites across the Exa datasets and four public benchmarks below.
 
 **Scout evaluates search tools on agentic tasks.** It swaps Exa, Perplexity,
-Parallel or Brave into a standard research agent while keeping the model,
+Parallel, Brave or Tavily into a standard research agent while keeping the model,
 prompts, research loop and budgets fixed across the search API presets. The agent
 searches repeatedly, follows up on results and synthesizes an answer from the
 evidence it retrieves. Each adapter preserves its provider's search request format.
@@ -153,7 +153,7 @@ Remove `--dry-run` to execute; remove `--limit` for the full datasets.
 **RAG** searches once, then answers.
 **Search** grades ranked results directly. **Extract + RAG** answers from a supplied URL.
 
-The ten primary API presets below each have `scout-`, `rag-` and `search-` variants
+The eleven primary API presets below each have `scout-`, `rag-` and `search-` variants
 (for example, `scout-perplexity-fast`). All provider settings live in
 [`systems.toml`](systems.toml); `uv run bench list` shows the full catalog.
 
@@ -163,9 +163,20 @@ The ten primary API presets below each have `scout-`, `rag-` and `search-` varia
 | Perplexity Search | `perplexity-web`, `perplexity-fast` |
 | Parallel Search | `parallel-turbo`, `parallel-fast`, `parallel-basic`, `parallel-advanced` |
 | Brave LLM Context | `brave-llm-context` |
+| Tavily Search | `tavily-advanced` |
 
 URL extraction supports Exa, Parallel and Claude. Set the corresponding `PERPLEXITY_API_KEY`,
-`PARALLEL_API_KEY`, `BRAVE_SEARCH_API_KEY` or `ANTHROPIC_API_KEY` when using them.
+`PARALLEL_API_KEY`, `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY` or `ANTHROPIC_API_KEY` when using them.
+
+Tavily uses advanced search with 10 results by default, returning provider snippets
+and publication dates. It requests no generated answer or full-page extraction.
+Costs use reported credits at the [pay-as-you-go rate](https://docs.tavily.com/documentation/api-credits)
+of $0.008 per credit, or two credits per advanced search when usage is absent.
+
+```bash
+export TAVILY_API_KEY=...
+uv run bench run --suite frames --system scout-tavily-advanced --limit 5
+```
 
 | Role | Default model |
 |------|---------------|
